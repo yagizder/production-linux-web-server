@@ -1,11 +1,12 @@
-# Building and Troubleshooting a Production Linux Web Server
+# Building, Troubleshooting, and Hardening a Production Linux Web Server
 
 ## Project Overview
 
 This project documents the process of turning a clean Ubuntu Server virtual
-machine into a working, verifiable Linux web server. The focus was not only on
-installing Nginx, but also on understanding the operating-system, networking,
-security, service-management, logging, and troubleshooting layers involved.
+machine into a working, verifiable, and hardened Linux web server. The project
+is intentionally presented as one evolving system: the first phase builds and
+troubleshoots the service, while the second phase measures and reduces its
+attack surface without losing administrative access.
 
 The lab includes:
 
@@ -15,13 +16,16 @@ The lab includes:
 - deploying a static website through a custom Nginx server block;
 - applying host firewall rules with UFW;
 - verifying services, listening ports, HTTP responses, and logs;
-- troubleshooting controlled HTTP and permission scenarios; and
-- confirming SSH, Nginx, UFW, and HTTP availability after a reboot.
+- troubleshooting controlled HTTP and permission scenarios;
+- hardening SSH, users, groups, permissions, and running services;
+- adding Fail2ban protection and auditing authentication logs; and
+- confirming SSH, Nginx, UFW, Fail2ban, and security policy persistence after
+  a reboot.
 
 This is a production-style learning environment running on a private VMware NAT
 network. It is not presented as a fully production-ready internet-facing
-system. TLS, disabling SSH password authentication, and additional operating-
-system hardening are intentionally deferred to the next hardening lab.
+system; TLS, centralized monitoring, backups, and external network controls
+remain outside this lab's scope.
 
 ## Architecture
 
@@ -33,16 +37,22 @@ flowchart LR
     SSH["OpenSSH Server<br/>TCP 22"]
     Nginx["Nginx<br/>TCP 80"]
     Site["Static website<br/>/var/www/devops-lab"]
+    Journal["systemd journal<br/>Authentication events"]
+    F2B["Fail2ban<br/>sshd jail"]
+    Ban["Temporary IP ban action"]
 
     Host --> NAT --> UFW
     UFW --> SSH
     UFW --> Nginx --> Site
+    SSH --> Journal --> F2B --> Ban
+    Ban -. blocks repeated sources .-> SSH
 ```
 
 The Windows host reaches the Ubuntu VM through VMware NAT. UFW denies
 unsolicited inbound traffic by default and permits only SSH and HTTP for this
-lab. OpenSSH provides administrative access with a passphrase-protected client
-key. Nginx listens on port 80 and serves the static website from
+lab. OpenSSH provides key-only administrative access with a passphrase-protected
+client key. Fail2ban monitors SSH authentication events through the systemd
+journal. Nginx listens on port 80 and serves the static website from
 `/var/www/devops-lab`.
 
 The VM uses a DHCP-provided private address on `ens33`, so its IP address is not
@@ -61,7 +71,8 @@ access to the static files.
 | Web server | Nginx 1.28 | Serves the static website over HTTP |
 | Service management | systemd | Manages service startup, status, reloads, and boot persistence |
 | Host firewall | UFW | Applies default-deny inbound filtering and explicit service rules |
-| Diagnostics | `curl`, `ss`, `systemctl`, `tail`, Nginx logs | Verifies each layer and supports troubleshooting |
+| Brute-force protection | Fail2ban | Monitors SSH failures through an active `sshd` jail |
+| Diagnostics | `curl`, `ss`, `systemctl`, `journalctl`, service logs | Verifies each layer and supports troubleshooting |
 | Version control | Git | Tracks the website, configuration example, and documentation |
 
 ## Repository Structure
@@ -72,13 +83,25 @@ access to the static files.
 ├── .gitignore
 ├── README.md
 ├── configs/
-│   └── nginx/
-│       └── devops-lab.conf
+│   ├── fail2ban/
+│   │   └── sshd.local
+│   ├── nginx/
+│   │   └── devops-lab.conf
+│   └── ssh/
+│       └── 00-lab-hardening.conf
+├── docs/
+│   ├── HARDENING-BEFORE-AFTER.md
+│   └── LAB-02-HARDENING.md
 ├── screenshots/
 │   ├── 01-custom-site-browser.png
 │   ├── 02-final-server-validation.png
 │   ├── 03-controlled-404-response.png
-│   └── 04-access-log-verification.png
+│   ├── 04-access-log-verification.png
+│   └── lab-02/
+│       ├── 01-effective-ssh-hardening.png
+│       ├── 02-critical-file-permissions.png
+│       ├── 03-fail2ban-sshd-jail.png
+│       └── 04-post-reboot-validation.png
 └── site/
     └── index.html
 ```
@@ -87,10 +110,16 @@ access to the static files.
   version-controlled copy of the active Nginx server block.
 - [`site/index.html`](site/index.html) is the static page deployed to the
   server.
+- [`configs/ssh/00-lab-hardening.conf`](configs/ssh/00-lab-hardening.conf) and
+  [`configs/fail2ban/sshd.local`](configs/fail2ban/sshd.local) are the
+  secret-free copies of the active hardening policy.
+- [`docs/LAB-02-HARDENING.md`](docs/LAB-02-HARDENING.md) documents the hardening
+  phase in Turkish; [`docs/HARDENING-BEFORE-AFTER.md`](docs/HARDENING-BEFORE-AFTER.md)
+  contains the measured baseline comparison.
 - The repository does not contain passwords, private keys, tokens, or other
   credentials.
 
-## Implementation
+## Phase 1 — Web Server Build and Troubleshooting
 
 1. **Validated the server baseline.** I inspected the hostname, user and sudo
    context, CPU, memory, LVM-backed storage, filesystem usage, network address,
@@ -130,6 +159,42 @@ access to the static files.
 9. **Verified persistence.** After rebooting the VM, I reconnected with the SSH
    key and confirmed that Nginx, UFW, and HTTP access returned automatically.
 
+## Phase 2 — Linux Server Hardening
+
+1. **Prepared recovery access and measured a baseline.** A VMware snapshot,
+   console login, and independent SSH-key session were verified before changing
+   authentication. Effective SSH values, listening ports, and UFW policy were
+   recorded for comparison.
+
+2. **Applied SSH hardening through a drop-in.** A dedicated
+   `00-lab-hardening.conf` was loaded before cloud-init's configuration. Root
+   and password login were disabled, key authentication was retained,
+   unnecessary forwarding was disabled, retry/grace limits were reduced, and
+   SSH access was restricted to the administrative user.
+
+3. **Validated behavior before closing recovery paths.** SSH syntax and
+   effective configuration were checked before reload. A new key-only session
+   succeeded, a password-only attempt failed, and the existing session remained
+   connected.
+
+4. **Audited least privilege and critical permissions.** The only normal user,
+   sudo rights, locked root password, SSH key permissions, and sensitive system
+   file modes were reviewed. An unused `lxd` group membership was removed while
+   required sudo access was preserved.
+
+5. **Reduced the service attack surface.** TCP and UDP listeners were matched
+   to their processes. Unused `ModemManager` and `multipathd` services were
+   stopped and disabled; required DHCP, DNS, time, SSH, and web functions were
+   preserved.
+
+6. **Enabled Fail2ban for SSH.** A systemd-journal-backed `sshd` jail was
+   configured for five failures within ten minutes and a ten-minute ban. The
+   configuration test, service state, jail state, and logs were verified.
+
+7. **Repeated acceptance checks after reboot.** Key-only SSH access, active
+   SSH/Nginx/Fail2ban services, effective root/password restrictions, active
+   `sshd` jail, and disabled unnecessary services all persisted.
+
 ## Security Considerations
 
 Implemented controls:
@@ -139,8 +204,16 @@ Implemented controls:
 - The SSH private key remains on the Windows host, is protected by a
   passphrase, and is excluded from version control. Only the public key is
   installed on the server.
+- SSH password authentication and direct root login are disabled. Only the
+  explicitly allowed administrative user can connect with a public key.
+- Unused SSH X11, agent, and TCP forwarding features are disabled; connection
+  retries and authentication grace time are reduced.
+- Fail2ban runs an `sshd` jail that monitors authentication events through the
+  systemd journal.
 - UFW denies unsolicited inbound traffic by default. Only TCP 22 (SSH) and TCP
   80 (HTTP) are allowed for this lab.
+- The unused `lxd` group membership and unnecessary ModemManager/multipathd
+  services were removed from the active privilege and service surface.
 - Website write access belongs to the administrative user. Nginx serves the
   content through its unprivileged `www-data` workers.
 - Nginx configuration is syntax-tested before reload, reducing the risk of
@@ -149,17 +222,17 @@ Implemented controls:
   formats, editor metadata, logs, and temporary files. Staged changes will also
   be reviewed before every commit because `.gitignore` is not a secret scanner.
 
-Known limitations and deferred hardening:
+Known limitations:
 
-- SSH password authentication is still enabled. It will be disabled only after
-  hardening and recovery-access checks in the next lab.
 - The site currently uses plain HTTP and does not provide TLS encryption.
 - The VM is reachable only through the private VMware NAT lab network and has
   not been exposed directly to the internet.
 - The server uses DHCP; its private IP address may change after a lease renewal
   or network restart.
-- Additional SSH restrictions, brute-force protection, automatic security
-  update policy, and further OS hardening are outside this lab's scope.
+- Fail2ban configuration and the active jail were verified, but the automatic
+  ban threshold was not triggered end-to-end from a separate attack client.
+- Centralized monitoring, backup/restore automation, TLS, and external network
+  controls are outside this lab's scope.
 
 ## Troubleshooting
 
@@ -208,7 +281,12 @@ verified the site again with `200 OK`.
 | Host-to-VM request | Windows `curl.exe -I` returned `HTTP/1.1 200 OK` through the NAT network |
 | SSH authentication | A forced public-key-only test returned the expected hostname and Nginx state |
 | Logging | Nginx access logs recorded both successful and controlled `404` requests |
-| Reboot persistence | SSH, Nginx, UFW, and HTTP availability were confirmed after reboot |
+| Effective SSH policy | `sshd -T` reported password/root login and unused forwarding disabled |
+| Least privilege | Root password remained locked and the unused `lxd` group membership was removed |
+| Critical permissions | System, sudo, SSH directory, and `authorized_keys` modes matched the secure baseline |
+| Fail2ban | Configuration test passed; service and `sshd` jail reported active |
+| Service reduction | ModemManager and multipathd reported inactive after being disabled |
+| Reboot persistence | Key-only SSH, Nginx, Fail2ban, hardening policy, and disabled services persisted |
 
 The final acceptance path was:
 
@@ -218,6 +296,7 @@ valid configuration
 → listening socket
 → permitted firewall rule
 → successful host-to-VM HTTP response
+→ effective SSH hardening and active Fail2ban jail
 → successful reboot test
 ```
 
@@ -252,6 +331,34 @@ missing-resource request with their respective `200` and `404` status codes.
 
 ![Nginx access log containing 200 and 404 responses](screenshots/04-access-log-verification.png)
 
+### Effective SSH hardening policy
+
+The effective SSH configuration confirmed that root/password authentication
+and unused forwarding features were disabled while public-key access remained
+enabled.
+
+![Effective SSH hardening values](screenshots/lab-02/01-effective-ssh-hardening.png)
+
+### Critical file permissions
+
+Sensitive system, sudo, SSH, and hardening configuration paths were checked for
+the expected ownership and restrictive modes.
+
+![Critical Linux and SSH file permissions](screenshots/lab-02/02-critical-file-permissions.png)
+
+### Active Fail2ban SSH jail
+
+Fail2ban loaded the `sshd` jail and matched SSH events from the systemd journal.
+
+![Active Fail2ban sshd jail](screenshots/lab-02/03-fail2ban-sshd-jail.png)
+
+### Post-reboot hardening validation
+
+After reboot, SSH, Nginx, and Fail2ban were active; root/password SSH remained
+disabled; and the unnecessary services remained inactive.
+
+![Post-reboot hardening validation](screenshots/lab-02/04-post-reboot-validation.png)
+
 ## What I Learned
 
 - A successful package installation does not prove that a service is usable;
@@ -274,3 +381,11 @@ missing-resource request with their respective `200` and `404` status codes.
   or a firewall timeout.
 - Good troubleshooting records observations, hypotheses, checks, conclusions,
   and verification without inventing a root cause when evidence is incomplete.
+- Hardening should begin with recovery access and a measured baseline rather
+  than with random configuration changes.
+- A configuration file's contents are not sufficient evidence; `sshd -T`
+  reveals the effective policy after includes, defaults, and ordering.
+- Least privilege includes group memberships and running daemons, not only
+  user accounts and file modes.
+- Security documentation must distinguish between a configured control and an
+  end-to-end test that was actually performed.

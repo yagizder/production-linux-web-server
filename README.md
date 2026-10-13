@@ -1,12 +1,13 @@
-# Building, Troubleshooting, and Hardening a Production Linux Web Server
+# Building, Hardening, and Automating a Production Linux Web Server
 
 ## Project Overview
 
 This project documents the process of turning a clean Ubuntu Server virtual
-machine into a working, verifiable, and hardened Linux web server. The project
-is intentionally presented as one evolving system: the first phase builds and
-troubleshoots the service, while the second phase measures and reduces its
-attack surface without losing administrative access.
+machine into a working, verifiable, hardened, and partially automated Linux web
+server. The project is intentionally presented as one evolving system: the
+first phase builds and troubleshoots the service, the second phase reduces its
+attack surface without losing administrative access, and the third phase turns
+repeated administration checks into tested Bash automation.
 
 The lab includes:
 
@@ -20,12 +21,15 @@ The lab includes:
 - hardening SSH, users, groups, permissions, and running services;
 - adding Fail2ban protection and auditing authentication logs; and
 - confirming SSH, Nginx, UFW, Fail2ban, and security policy persistence after
-  a reboot.
+  a reboot;
+- creating Bash scripts for system information, disk usage, service health,
+  backup, and safe log cleanup; and
+- scheduling service-health checks with a persistent systemd timer.
 
 This is a production-style learning environment running on a private VMware NAT
 network. It is not presented as a fully production-ready internet-facing
-system; TLS, centralized monitoring, backups, and external network controls
-remain outside this lab's scope.
+system; TLS, centralized monitoring, off-host backups, full disaster recovery,
+and external network controls remain outside this lab's scope.
 
 ## Architecture
 
@@ -40,12 +44,21 @@ flowchart LR
     Journal["systemd journal<br/>Authentication events"]
     F2B["Fail2ban<br/>sshd jail"]
     Ban["Temporary IP ban action"]
+    Timer["systemd timer<br/>Every 5 minutes"]
+    Health["Bash health check<br/>Nginx, SSH, Fail2ban"]
+    Backup["Bash backup<br/>Nginx, SSH, website"]
+    Archive["Root-only local archive<br/>/var/backups/devops-lab"]
 
     Host --> NAT --> UFW
     UFW --> SSH
     UFW --> Nginx --> Site
     SSH --> Journal --> F2B --> Ban
     Ban -. blocks repeated sources .-> SSH
+    Timer --> Health
+    Health -. verifies .-> SSH
+    Health -. verifies .-> Nginx
+    Health -. verifies .-> F2B
+    Backup --> Archive
 ```
 
 The Windows host reaches the Ubuntu VM through VMware NAT. UFW denies
@@ -73,6 +86,8 @@ access to the static files.
 | Host firewall | UFW | Applies default-deny inbound filtering and explicit service rules |
 | Brute-force protection | Fail2ban | Monitors SSH failures through an active `sshd` jail |
 | Diagnostics | `curl`, `ss`, `systemctl`, `journalctl`, service logs | Verifies each layer and supports troubleshooting |
+| Automation | Bash, systemd timers | Runs repeatable health, disk, backup, and cleanup tasks |
+| Backup | GNU `tar` | Creates and verifies local compressed configuration/content archives |
 | Version control | Git | Tracks the website, configuration example, and documentation |
 
 ## Repository Structure
@@ -87,21 +102,37 @@ access to the static files.
 │   │   └── sshd.local
 │   ├── nginx/
 │   │   └── devops-lab.conf
-│   └── ssh/
-│       └── 00-lab-hardening.conf
+│   ├── ssh/
+│   │   └── 00-lab-hardening.conf
+│   └── systemd/
+│       ├── server-health.service
+│       └── server-health.timer
 ├── docs/
 │   ├── HARDENING-BEFORE-AFTER.md
-│   └── LAB-02-HARDENING.md
+│   ├── LAB-02-HARDENING.md
+│   └── LAB-03-AUTOMATION.md
 ├── screenshots/
 │   ├── 01-custom-site-browser.png
 │   ├── 02-final-server-validation.png
 │   ├── 03-controlled-404-response.png
 │   ├── 04-access-log-verification.png
-│   └── lab-02/
+│   ├── lab-02/
 │       ├── 01-effective-ssh-hardening.png
 │       ├── 02-critical-file-permissions.png
 │       ├── 03-fail2ban-sshd-jail.png
 │       └── 04-post-reboot-validation.png
+│   └── lab-03/
+│       ├── 01-system-information.png
+│       ├── 02-disk-and-service-checks.png
+│       ├── 03-backup-verification.png
+│       ├── 04-log-cleanup-journal.png
+│       └── 05-systemd-timer-success.png
+├── scripts/
+│   ├── disk-monitor.sh
+│   ├── log-cleanup.sh
+│   ├── server-backup.sh
+│   ├── service-health.sh
+│   └── system-info.sh
 └── site/
     └── index.html
 ```
@@ -116,6 +147,11 @@ access to the static files.
 - [`docs/LAB-02-HARDENING.md`](docs/LAB-02-HARDENING.md) documents the hardening
   phase in Turkish; [`docs/HARDENING-BEFORE-AFTER.md`](docs/HARDENING-BEFORE-AFTER.md)
   contains the measured baseline comparison.
+- [`docs/LAB-03-AUTOMATION.md`](docs/LAB-03-AUTOMATION.md) documents the Bash
+  automation phase, exit-code tests, backup safety, and systemd timer behavior.
+- [`scripts/`](scripts) contains the five tested administration scripts;
+  [`configs/systemd/`](configs/systemd) contains the secret-free health-check
+  service and timer definitions.
 - The repository does not contain passwords, private keys, tokens, or other
   credentials.
 
@@ -195,6 +231,34 @@ access to the static files.
    SSH/Nginx/Fail2ban services, effective root/password restrictions, active
    `sshd` jail, and disabled unnecessary services all persisted.
 
+## Phase 3 — Bash Server Automation
+
+1. **Established a restricted working layout.** Scripts and operational logs
+   were separated under `/home/yagiz/server-automation`; sensitive system
+   archives were written to root-owned `/var/backups/devops-lab`.
+
+2. **Created a system-information report.** A reusable script collects the
+   hostname, user, uptime, memory, root-filesystem usage, and global IP address
+   while appending the same output to a local log.
+
+3. **Added actionable disk and service checks.** Disk usage is compared with a
+   validated threshold, while Nginx, SSH, and Fail2ban are checked in a loop.
+   Healthy, unhealthy, and invalid-input paths return distinct exit codes.
+
+4. **Created and verified local backups.** Nginx, SSH, and website content are
+   archived with a timestamp under a root-only directory. The resulting
+   archive is immediately read with `tar -tzf` so a successful command is not
+   mistaken for a usable backup.
+
+5. **Implemented safe log cleanup.** Cleanup is restricted to the lab log
+   directory, validates its retention input, defaults to dry-run, and requires
+   an explicit `--delete` flag. Both paths were tested with a controlled old
+   file and recorded in the journal.
+
+6. **Scheduled service-health checks.** A `oneshot` systemd service runs as the
+   normal administrative user, and a persistent timer triggers it every five
+   minutes. Manual and timer-triggered executions completed successfully.
+
 ## Security Considerations
 
 Implemented controls:
@@ -221,6 +285,12 @@ Implemented controls:
 - The repository includes ignore rules for environment files, private-key
   formats, editor metadata, logs, and temporary files. Staged changes will also
   be reviewed before every commit because `.gitignore` is not a secret scanner.
+- Cleanup defaults to dry-run and is constrained to the known lab-log path;
+  system and Nginx logs remain under the operating system's logrotate policy.
+- System backups require root, validate every expected source, use a root-only
+  destination directory, and verify that the resulting archive can be listed.
+- The scheduled health check runs as `yagiz`, not root, because reading service
+  state does not require administrative write privileges.
 
 Known limitations:
 
@@ -231,8 +301,13 @@ Known limitations:
   or network restart.
 - Fail2ban configuration and the active jail were verified, but the automatic
   ban threshold was not triggered end-to-end from a separate attack client.
-- Centralized monitoring, backup/restore automation, TLS, and external network
-  controls are outside this lab's scope.
+- Backups currently remain on the same VM; off-host copies and full restore or
+  disaster-recovery testing have not yet been implemented.
+- Only the service-health check is scheduled. Disk, backup, cleanup, and system
+  information scripts remain manual to avoid duplicating timers solely for the
+  lab demonstration.
+- Centralized monitoring, TLS, and external network controls remain outside
+  this lab's scope.
 
 ## Troubleshooting
 
@@ -269,6 +344,14 @@ inconclusive without further ACL evidence, I did not claim an unsupported root
 cause. I restored the known-good `755` directory and `644` file policy and
 verified the site again with `200 OK`.
 
+### Timer referenced a missing service unit
+
+The first `server-health.timer` start failed because its referenced
+`server-health.service` file had not been saved. Listing and reading the unit
+paths exposed the missing file. After creating it and running
+`systemctl daemon-reload`, the service completed with `status=0/SUCCESS` and
+the timer displayed its next scheduled activation.
+
 ## Verification
 
 | Check | Evidence |
@@ -287,6 +370,11 @@ verified the site again with `200 OK`.
 | Fail2ban | Configuration test passed; service and `sshd` jail reported active |
 | Service reduction | ModemManager and multipathd reported inactive after being disabled |
 | Reboot persistence | Key-only SSH, Nginx, Fail2ban, hardening policy, and disabled services persisted |
+| Script syntax | All five Bash scripts passed `bash -n` |
+| Exit-code behavior | Disk and service scripts returned distinct success, operational-warning, and invalid-input codes |
+| Local backup | A timestamped archive was created under `/var/backups/devops-lab` and passed `tar -tzf` verification |
+| Safe cleanup | Dry-run listed the controlled old log before explicit deletion; journal recorded both actions |
+| Scheduled automation | `server-health.service` completed successfully and `server-health.timer` reported enabled, active, and a next run |
 
 The final acceptance path was:
 
@@ -298,6 +386,8 @@ valid configuration
 → successful host-to-VM HTTP response
 → effective SSH hardening and active Fail2ban jail
 → successful reboot test
+→ tested Bash health and maintenance scripts
+→ active systemd health-check timer
 ```
 
 ## Verification Evidence
@@ -359,6 +449,43 @@ disabled; and the unnecessary services remained inactive.
 
 ![Post-reboot hardening validation](screenshots/lab-02/04-post-reboot-validation.png)
 
+### Bash system-information report
+
+The first automation script reported the host, user, uptime, memory, root
+filesystem, and active global address while appending the same output to its
+log file.
+
+![Bash system-information report and log output](screenshots/lab-03/01-system-information.png)
+
+### Disk and service failure paths
+
+The disk monitor distinguished syntax success, threshold warning, and invalid
+input with explicit exit codes. The service checker reported all real services
+healthy and returned failure for a controlled nonexistent service.
+
+![Disk threshold and service-health checks](screenshots/lab-03/02-disk-and-service-checks.png)
+
+### Root-owned backup and journal evidence
+
+The backup directory was restricted to root, the timestamped archive was
+created successfully, and the operation was recorded through the journal.
+
+![Backup archive permissions and journal record](screenshots/lab-03/03-backup-verification.png)
+
+### Dry-run-first log cleanup
+
+The cleanup script recorded that the controlled old log was deleted while the
+remaining current logs were preserved.
+
+![Log cleanup result and journal evidence](screenshots/lab-03/04-log-cleanup-journal.png)
+
+### Successful systemd service and timer
+
+The oneshot service completed with `status=0/SUCCESS`; its timer remained
+active and displayed the next scheduled run.
+
+![Successful systemd service and active timer](screenshots/lab-03/05-systemd-timer-success.png)
+
 ## What I Learned
 
 - A successful package installation does not prove that a service is usable;
@@ -389,3 +516,12 @@ disabled; and the unnecessary services remained inactive.
   user accounts and file modes.
 - Security documentation must distinguish between a configured control and an
   end-to-end test that was actually performed.
+- Automation becomes reliable when success, operational failure, and invalid
+  input produce deliberate exit codes instead of only human-readable output.
+- A safe cleanup task should be path-constrained and dry-run by default; an
+  explicit destructive mode is easier to review and test.
+- A backup is stronger when its expected sources are validated and the archive
+  is checked immediately, but local archive validation is still not equivalent
+  to an off-host restore or disaster-recovery test.
+- A systemd `.service` defines what runs, while a `.timer` defines when it runs;
+  a successful `oneshot` service normally returns to `inactive (dead)`.

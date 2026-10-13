@@ -1,0 +1,9 @@
+[Unit]
+Description=Check critical server services
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=yagiz
+Group=yagiz
+ExecStart=/home/yagiz/server-automation/scripts/service-health.sh
